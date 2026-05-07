@@ -17,6 +17,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/cloudwego/hertz/cmd/hz/app"
@@ -26,6 +27,8 @@ import (
 func main() {
 	// run in plugin mode
 	app.PluginMode()
+
+	fmt.Println("test...")
 
 	// run in normal mode
 	Run()
