@@ -220,6 +220,7 @@ func TestDefaultWriter(t *testing.T) {
 }
 
 func TestServerDisableReqCtxPool(t *testing.T) {
+	// pool enabled: ctx is reused via Get/Put, POOL_KEY set by New() is observable.
 	server := &Server{}
 	reqCtx := &app.RequestContext{}
 	server.Core = &mockCore{
@@ -237,26 +238,64 @@ func TestServerDisableReqCtxPool(t *testing.T) {
 	defaultConn := mock.NewConn("GET / HTTP/1.1\nHost: foobar.com\n\n")
 	err := server.Serve(context.TODO(), defaultConn)
 	assert.Nil(t, err)
+
+	// pool disabled: New() must still be invoked so the ctx is fully initialized,
+	// and it must be called on every request (no Get/Put reuse).
 	disabaleRequestContextPool = true
 	defer func() {
 		// reset global variable
 		disabaleRequestContextPool = false
 	}()
+	var newCalled int
 	server.Core = &mockCore{
 		ctxPool: &sync.Pool{New: func() interface{} {
-			reqCtx.Set("POOL_KEY", "in pool")
-			return reqCtx
+			newCalled++
+			ctx := &app.RequestContext{}
+			ctx.Set("POOL_KEY", "in pool")
+			return ctx
 		}},
 		mockHandler: func(c context.Context, ctx *app.RequestContext) {
-			if len(ctx.GetString("POOL_KEY")) != 0 {
-				t.Fatal("must not get pool key")
+			// Before the fix this would be empty because the disabled branch
+			// returned a raw &app.RequestContext{} bypassing pool.New().
+			if ctx.GetString("POOL_KEY") != "in pool" {
+				t.Fatal("New() was not invoked when pool is disabled")
 			}
 		},
 		isRunning: true,
 	}
-	defaultConn = mock.NewConn("GET / HTTP/1.1\nHost: foobar.com\n\n")
-	err = server.Serve(context.TODO(), defaultConn)
-	assert.Nil(t, err)
+	for i := 0; i < 2; i++ {
+		err = server.Serve(context.TODO(), mock.NewConn("GET / HTTP/1.1\nHost: foobar.com\n\n"))
+		assert.Nil(t, err)
+	}
+	// Disabled mode never reuses ctx via Get/Put, so New must run for each request.
+	assert.DeepEqual(t, 2, newCalled)
+}
+
+// Regression test: with EnableTrace=true, the pre-fix disabled branch returned a
+// raw &app.RequestContext{} whose TraceInfo was nil. The Serve defer then called
+// the trace controller with that nil TraceInfo and panicked. The fix routes
+// through pool.New() which installs a TraceInfo, so Serve completes normally.
+func TestServerDisableReqCtxPool_TracePanic(t *testing.T) {
+	disabaleRequestContextPool = true
+	defer func() {
+		disabaleRequestContextPool = false
+	}()
+
+	server := &Server{}
+	server.eventStackPool = pool
+	server.EnableTrace = true
+	server.Core = &mockCore{
+		ctxPool: &sync.Pool{New: func() interface{} {
+			ctx := &app.RequestContext{}
+			ti := traceinfo.NewTraceInfo()
+			ti.Stats().SetLevel(2)
+			ctx.SetTraceInfo(&mockTraceInfo{ti})
+			return ctx
+		}},
+		controller: &inStats.Controller{},
+	}
+	err := server.Serve(context.TODO(), mock.NewConn("GET /aaa HTTP/1.1\nHost: foobar.com\n\n"))
+	assert.True(t, errors.Is(err, errs.ErrShortConnection))
 }
 
 func TestServer_RaceDetect(t *testing.T) {
