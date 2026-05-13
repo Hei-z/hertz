@@ -93,7 +93,7 @@ type Server struct {
 
 func (s Server) getRequestContext() *app.RequestContext {
 	if disabaleRequestContextPool {
-		return &app.RequestContext{}
+		return s.Core.GetCtxPool().New().(*app.RequestContext)
 	}
 	return s.Core.GetCtxPool().Get().(*app.RequestContext)
 }
